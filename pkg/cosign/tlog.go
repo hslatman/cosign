@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
+	"github.com/ryboe/q"
 	"github.com/transparency-dev/merkle/proof"
 	"github.com/transparency-dev/merkle/rfc6962"
 
@@ -172,6 +173,7 @@ func rekorPubsFromClient(rekorClient *client.Rekor) (*TrustedTransparencyLogPubK
 // TLogUpload will upload the signature, public key and payload to the transparency log.
 func TLogUpload(ctx context.Context, rekorClient *client.Rekor, signature []byte, sha256CheckSum hash.Hash, pemBytes []byte) (*models.LogEntryAnon, error) {
 	re := rekorEntry(sha256CheckSum, signature, pemBytes)
+	q.Q(re)
 	returnVal := models.Hashedrekord{
 		APIVersion: swag.String(re.APIVersion()),
 		Spec:       re.HashedRekordObj,
@@ -202,6 +204,11 @@ func TLogUploadInTotoAttestation(ctx context.Context, rekorClient *client.Rekor,
 func doUpload(ctx context.Context, rekorClient *client.Rekor, pe models.ProposedEntry) (*models.LogEntryAnon, error) {
 	params := entries.NewCreateLogEntryParamsWithContext(ctx)
 	params.SetProposedEntry(pe)
+	q.Q(pe)
+
+	// TODO(hs): this is where error happens
+	// Error: signing blob.txt: [POST /api/v1/log/entries][400] createLogEntryBadRequest  &{Code:400 Message:error processing entry: ed25519 unsupported for hashedrekord}
+	//main.go:74: error during command execution: signing blob.txt: [POST /api/v1/log/entries][400] createLogEntryBadRequest  &{Code:400 Message:error processing entry: ed25519 unsupported for hashedrekord}
 	resp, err := rekorClient.Entries.CreateLogEntry(params)
 	if err != nil {
 		// If the entry already exists, we get a specific error.

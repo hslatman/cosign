@@ -16,14 +16,19 @@
 package sign
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"os"
 	"path/filepath"
 
+	"github.com/ryboe/q"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/rekor"
 	internal "github.com/sigstore/cosign/v2/internal/pkg/cosign"
@@ -44,7 +49,17 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 	ctx, cancel := context.WithTimeout(context.Background(), ro.Timeout)
 	defer cancel()
 
+	var msg []byte
+
 	if payloadPath == "-" {
+		// TODO: payload to sign is actually the Wasm hashes, which also uses SHA256, which
+		// is great. But they shouldn't be read, and then hashed again, though? Or can we
+		// make it work like that too? E.g. sort of double hashing that way. The thing is we
+		// want to use the public key in the cert (which can be Ed25519) to verify the signature
+		// over the Wasm module. So we need to sign those hashes, record the output, put that in
+		// the Wasm (or detached), then upload the signature. I think a new command _may_ make
+		// sense for this, so that we can read the Wasm immediately, then sign it, and record
+		// the hash.
 		payload = internal.NewHashReader(os.Stdin, sha256.New())
 	} else {
 		ui.Infof(ctx, "Using payload from: %s", payloadPath)
@@ -53,10 +68,28 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 			return nil, err
 		}
 		payload = internal.NewHashReader(f, sha256.New())
+		msg, _ = os.ReadFile(f.Name())
 	}
 	if err != nil {
 		return nil, err
 	}
+
+	hf := func() hash.Hash {
+		fmt.Println("returning custom hash")
+		return &customHash{state: []byte{}}
+	}
+	crypto.RegisterHash(crypto.Hash(1), hf)
+
+	wasmMsg, err := base64.StdEncoding.DecodeString("d2FzbXNpZwEBAePYQL+P/sl8K6Cvs9tnJrKcijdPTphkb3PbXTUdTg9v")
+	if err != nil {
+		return nil, err
+	}
+
+	wasmDigest := sha512.Sum512(wasmMsg)
+
+	payload = internal.NewHashReader(bytes.NewReader(wasmDigest[:]), crypto.Hash(1).New()) // fake hash; just return the bytes (I hope)
+
+	q.Q(payload)
 
 	sv, err := SignerFromKeyOpts(ctx, "", "", ko)
 	if err != nil {
@@ -68,6 +101,8 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 	if err != nil {
 		return nil, fmt.Errorf("signing blob: %w", err)
 	}
+
+	q.Q(sig)
 
 	signedPayload := cosign.LocalSignedPayload{}
 
@@ -123,6 +158,42 @@ func SignBlobCmd(ro *options.RootOptions, ko options.KeyOpts, payloadPath string
 		if err != nil {
 			return nil, err
 		}
+
+		// if sig == nil {
+		// 	return nil, nil, types.ValidationError(errors.New("missing signature"))
+		// }
+		// // Hashed rekord type only works for x509 signature types
+		// sigObj, err := x509.NewSignature(bytes.NewReader(sig.Content))
+		// if err != nil {
+		// 	return nil, nil, types.ValidationError(err)
+		// }
+
+		// key := sig.PublicKey
+		// if key == nil {
+		// 	return nil, nil, types.ValidationError(errors.New("missing public key"))
+		// }
+		// keyObj, err := x509.NewPublicKey(bytes.NewReader(key.Content))
+		// if err != nil {
+		// 	return nil, nil, types.ValidationError(err)
+		// }
+
+		// verifier, err := sigsig.LoadVerifier(p, crypto.SHA256)
+		// if err != nil {
+		// 	return err
+		// }
+
+		// decoded, err := io.ReadAll(&payload)
+		// if err != nil {
+		// 	return nil, fmt.Errorf("failed reading payload: %w", err)
+		// }
+
+		q.Q(msg)
+
+		err = sv.VerifySignature(bytes.NewReader(sig), bytes.NewBuffer(wasmDigest[:]))
+		if err != nil {
+			return nil, fmt.Errorf("failed verifying payload: %w", err)
+		}
+
 		entry, err := cosign.TLogUpload(ctx, rekorClient, sig, &payload, rekorBytes)
 		if err != nil {
 			return nil, err
@@ -203,3 +274,31 @@ func extractCertificate(ctx context.Context, sv *SignerVerifier) ([]byte, error)
 	}
 	return nil, nil
 }
+
+type customHash struct {
+	state []byte
+}
+
+func (h *customHash) BlockSize() int {
+	return 64
+}
+
+func (h *customHash) Size() int {
+	return 64
+}
+
+func (h *customHash) Reset() {
+	h.state = []byte{}
+}
+
+func (h *customHash) Sum(b []byte) []byte {
+	return h.state
+}
+
+func (h *customHash) Write(b []byte) (int, error) {
+	fmt.Println("writing", len(b))
+	h.state = b
+	return len(b), nil
+}
+
+var _ hash.Hash = (*customHash)(nil)

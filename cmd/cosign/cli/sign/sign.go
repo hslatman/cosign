@@ -19,6 +19,8 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -32,6 +34,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/ryboe/q"
 
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/fulcio"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/fulcio/fulcioverifier"
@@ -536,6 +539,22 @@ func signerFromNewKey() (*SignerVerifier, error) {
 	}, nil
 }
 
+func ed25519SignerFromNewKey() (*SignerVerifier, error) {
+	_, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generating cert: %w", err)
+	}
+
+	sv, err := signature.LoadED25519SignerVerifier(privKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SignerVerifier{
+		SignerVerifier: sv,
+	}, nil
+}
+
 func keylessSigner(ctx context.Context, ko options.KeyOpts, sv *SignerVerifier) (*SignerVerifier, error) {
 	var (
 		k   *fulcio.Signer
@@ -551,6 +570,9 @@ func keylessSigner(ctx context.Context, ko options.KeyOpts, sv *SignerVerifier) 
 			return nil, fmt.Errorf("getting key from Fulcio: %w", err)
 		}
 	}
+
+	q.Q(sv)
+	q.Q(k)
 
 	return &SignerVerifier{
 		Cert:           k.Cert,
@@ -571,7 +593,8 @@ func SignerFromKeyOpts(ctx context.Context, certPath string, certChainPath strin
 	default:
 		genKey = true
 		ui.Infof(ctx, "Generating ephemeral keys...")
-		sv, err = signerFromNewKey()
+		//sv, err = signerFromNewKey()
+		sv, err = ed25519SignerFromNewKey()
 	}
 	if err != nil {
 		return nil, err
